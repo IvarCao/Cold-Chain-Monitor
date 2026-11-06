@@ -325,28 +325,3 @@ pytest backend/tests/
 | Duplicate-reading prevention | Implemented in backend |
 | Local web dashboard | Initial implementation |
 | End-to-end hardware testing | Pending |
-
-## Future Improvements
-
-- Replace the DHT11 with a higher-accuracy temperature sensor.
-- Add configurable temperature thresholds and alert notifications.
-- Implement device-to-delivery or order ID association.
-- Add sensor calibration and validation procedures.
-- Improve offline storage management and recovery testing.
-- Add authentication and secure communication.
-- Expand dashboard functionality with historical reports and exportable data.
-- Evaluate the system against more demanding cold-chain monitoring requirements.
-
-## Disclaimer
-
-This project is a personal educational prototype intended to demonstrate embedded firmware development, sensor integration, wireless communication, backend development, and data visualization.
-
-The DHT11 is not a validated pharmaceutical monitoring sensor. This system has not been certified or validated for medication storage, transportation, or regulatory compliance. Its readings and alerts should not be used to make medication-safety decisions.
-
-## Author
-
-**YOUR NAME**
-
-Computer Engineering Graduate | Embedded Systems | Firmware Development | Software Engineering
-
-GitHub: https://github.com/YOUR-USERNAME
