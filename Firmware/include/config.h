@@ -1,9 +1,9 @@
 #pragma once
 #include <cstdint>
 // Replace these placeholders before building
-#define WIFI_SSID       "Ivar_hotspot"
-#define WIFI_PASSWORD   "Ivarcao123"
-#define API_BASE_URL    "http://10.234.209.20:8000"
+#define WIFI_SSID       "YOUR_WIFI_NAME"
+#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+#define API_BASE_URL    "http://192.168.1.50:8000"
 #define DEVICE_ID       "ESP32-001"
 
 constexpr uint8_t DHT_PIN = 5;  // GPIO pin connected to the DHT11 data pin
