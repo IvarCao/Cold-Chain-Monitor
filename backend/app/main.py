@@ -1,6 +1,8 @@
+"""Meridian local API: idempotent ingestion, gap tracking and temperature alerts."""
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import smtplib
 import sqlite3
@@ -11,8 +13,13 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT_DIR / "frontend"
@@ -20,10 +27,9 @@ DEFAULT_DB = ROOT_DIR / "backend" / "data" / "meridian.sqlite3"
 DB_PATH = Path(os.getenv("MERIDIAN_DB_PATH", str(DEFAULT_DB)))
 SAMPLE_INTERVAL_SECONDS = int(os.getenv("MERIDIAN_SAMPLE_INTERVAL_SECONDS", "5"))
 MAX_GAP_EXPANSION = 10000  # Prevent a corrupt counter from causing an unbounded insert loop.
-DEFAULT_MIN_TEMP_F = float(os.getenv("MERIDIAN_MIN_TEMP_F", "35.6"))
-DEFAULT_MAX_TEMP_F = float(os.getenv("MERIDIAN_MAX_TEMP_F", "46.4"))
+DEFAULT_MIN_TEMP_F = float(os.getenv("MERIDIAN_MIN_TEMP_F", "35"))
+DEFAULT_MAX_TEMP_F = float(os.getenv("MERIDIAN_MAX_TEMP_F", "45"))
 DEFAULT_EXCURSION_DURATION_SECONDS = int(os.getenv("MERIDIAN_EXCURSION_DURATION_SECONDS", "120"))
-DEFAULT_MAX_SAMPLE_GAP_SECONDS = int(os.getenv("MERIDIAN_MAX_SAMPLE_GAP_SECONDS", str(SAMPLE_INTERVAL_SECONDS * 2)))
 
 async def notification_worker():
     while True:
@@ -48,7 +54,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     lifespan=lifespan,
     title="Meridian Cold-Chain Monitor API",
-    version="0.3.0",
+    version="0.4.0",
     description="Local API for ESP32 environmental readings, coverage gaps and alerts.",
 )
 
@@ -74,7 +80,6 @@ class ThresholdUpdate(BaseModel):
     minimum_f: float = Field(ge=-40, le=176)
     maximum_f: float = Field(ge=-40, le=176)
     excursion_duration_seconds: int = Field(default=DEFAULT_EXCURSION_DURATION_SECONDS, ge=1, le=86400)
-    max_sample_gap_seconds: int = Field(default=DEFAULT_MAX_SAMPLE_GAP_SECONDS, ge=1, le=3600)
 
     @field_validator("maximum_f")
     @classmethod
@@ -134,8 +139,7 @@ def initialize_database() -> None:
                 queue_drained_confirmed INTEGER NOT NULL DEFAULT 0,
                 threshold_min_f REAL NOT NULL,
                 threshold_max_f REAL NOT NULL,
-                excursion_duration_seconds INTEGER NOT NULL DEFAULT 120,
-                max_sample_gap_seconds INTEGER NOT NULL DEFAULT 10
+                excursion_duration_seconds INTEGER NOT NULL DEFAULT 120
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_delivery_per_device
                 ON deliveries(device_id) WHERE status='active';
@@ -147,8 +151,7 @@ def initialize_database() -> None:
                 last_received_at TEXT,
                 minimum_f REAL NOT NULL DEFAULT 35.6,
                 maximum_f REAL NOT NULL DEFAULT 46.4,
-                excursion_duration_seconds INTEGER NOT NULL DEFAULT 120,
-                max_sample_gap_seconds INTEGER NOT NULL DEFAULT 10
+                excursion_duration_seconds INTEGER NOT NULL DEFAULT 120
             );
             CREATE TABLE IF NOT EXISTS data_gaps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,15 +238,12 @@ def initialize_database() -> None:
             conn.execute("ALTER TABLE deliveries ADD COLUMN queue_drained_confirmed INTEGER NOT NULL DEFAULT 0")
         for column, declaration in (
             ("excursion_duration_seconds", "INTEGER NOT NULL DEFAULT 120"),
-            ("max_sample_gap_seconds", "INTEGER NOT NULL DEFAULT 10"),
         ):
             if column not in delivery_columns:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {column} {declaration}")
         device_columns = {row["name"] for row in conn.execute("PRAGMA table_info(device_state)").fetchall()}
         if "excursion_duration_seconds" not in device_columns:
             conn.execute("ALTER TABLE device_state ADD COLUMN excursion_duration_seconds INTEGER NOT NULL DEFAULT 120")
-        if "max_sample_gap_seconds" not in device_columns:
-            conn.execute("ALTER TABLE device_state ADD COLUMN max_sample_gap_seconds INTEGER NOT NULL DEFAULT 10")
         alert_columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
         if "confirmed_at" not in alert_columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN confirmed_at TEXT")
@@ -256,8 +256,8 @@ def initialize_database() -> None:
 
 def ensure_device(conn: sqlite3.Connection, device_id: str) -> sqlite3.Row:
     conn.execute(
-        "INSERT OR IGNORE INTO device_state(device_id, minimum_f, maximum_f, excursion_duration_seconds, max_sample_gap_seconds) VALUES (?, ?, ?, ?, ?)",
-        (device_id, DEFAULT_MIN_TEMP_F, DEFAULT_MAX_TEMP_F, DEFAULT_EXCURSION_DURATION_SECONDS, DEFAULT_MAX_SAMPLE_GAP_SECONDS),
+        "INSERT OR IGNORE INTO device_state(device_id, minimum_f, maximum_f, excursion_duration_seconds) VALUES (?, ?, ?, ?)",
+        (device_id, DEFAULT_MIN_TEMP_F, DEFAULT_MAX_TEMP_F, DEFAULT_EXCURSION_DURATION_SECONDS),
     )
     return conn.execute("SELECT * FROM device_state WHERE device_id=?", (device_id,)).fetchone()
 
@@ -296,14 +296,8 @@ def is_out_of_range(temperature: float, low: float, high: float) -> bool:
     return temperature < low or temperature > high
 
 
-def calculate_temperature_excursions(
-    readings,
-    low: float,
-    high: float,
-    required_duration_seconds: int,
-    max_sample_gap_seconds: int,
-) -> list[dict]:
-    """Return only continuous out-of-range periods that meet the dwell time."""
+def calculate_temperature_excursions(readings, low: float, high: float, required_seconds: int) -> list[dict]:
+    """Group observed out-of-range episodes; qualify by measurement timestamp span."""
     ordered = sorted(readings, key=lambda row: parse_reading_time(row["timestamp"]))
     excursions: list[dict] = []
     episode: list = []
@@ -311,40 +305,27 @@ def calculate_temperature_excursions(
     def finish_episode():
         if not episode:
             return
-        started = parse_reading_time(episode[0]["timestamp"])
-        last = parse_reading_time(episode[-1]["timestamp"])
-        duration = (last - started).total_seconds()
-        if duration >= required_duration_seconds:
-            temps = [float(item["temperature_f"]) for item in episode]
-            excursions.append({
-                "started_at": started.isoformat().replace("+00:00", "Z"),
-                "confirmed_at": next(
-                    parse_reading_time(item["timestamp"]).isoformat().replace("+00:00", "Z")
-                    for item in episode
-                    if (parse_reading_time(item["timestamp"]) - started).total_seconds() >= required_duration_seconds
-                ),
-                "ended_at": last.isoformat().replace("+00:00", "Z"),
-                "duration_seconds": round(duration, 3),
-                "type": "below_minimum" if max(temps) < low else "above_maximum" if min(temps) > high else "out_of_range",
-                "minimum_temperature_f": min(temps),
-                "maximum_temperature_f": max(temps),
-                "reading_count": len(episode),
-                "record_ids": [item["record_id"] for item in episode],
-            })
+        times = [parse_reading_time(item["timestamp"]) for item in episode]
+        temps = [float(item["temperature_f"]) for item in episode]
+        duration_seconds = round((times[-1] - times[0]).total_seconds(), 3)
+        excursions.append({
+            "qualifies_for_failure": duration_seconds >= required_seconds,
+            "started_at": times[0].isoformat().replace("+00:00", "Z"),
+            "ended_at": times[-1].isoformat().replace("+00:00", "Z"),
+            "duration_seconds": duration_seconds,
+            "type": "below_minimum" if max(temps) < low else "above_maximum" if min(temps) > high else "out_of_range",
+            "minimum_temperature_f": min(temps),
+            "maximum_temperature_f": max(temps),
+            "reading_count": len(episode),
+            "record_ids": [item["record_id"] for item in episode],
+        })
 
-    previous_time = None
     for row in ordered:
-        current_time = parse_reading_time(row["timestamp"])
-        outside = is_out_of_range(float(row["temperature_f"]), low, high)
-        if previous_time is not None and (current_time - previous_time).total_seconds() > max_sample_gap_seconds:
-            finish_episode()
-            episode = []
-        if outside:
+        if is_out_of_range(float(row["temperature_f"]), low, high):
             episode.append(row)
         else:
             finish_episode()
             episode = []
-        previous_time = current_time
     finish_episode()
     return excursions
 
@@ -353,17 +334,15 @@ def evaluate_temperature(conn: sqlite3.Connection, reading: ReadingIn) -> None:
     state = ensure_device(conn, reading.device_id)
     low, high = float(state["minimum_f"]), float(state["maximum_f"])
     required_seconds = int(state["excursion_duration_seconds"])
-    max_gap_seconds = int(state["max_sample_gap_seconds"])
     if reading.delivery_id:
         delivery_rules = conn.execute(
-            "SELECT threshold_min_f, threshold_max_f, excursion_duration_seconds, max_sample_gap_seconds "
+            "SELECT threshold_min_f, threshold_max_f, excursion_duration_seconds "
             "FROM deliveries WHERE delivery_id=? AND device_id=?",
             (reading.delivery_id, reading.device_id),
         ).fetchone()
         if delivery_rules:
             low, high = float(delivery_rules["threshold_min_f"]), float(delivery_rules["threshold_max_f"])
             required_seconds = int(delivery_rules["excursion_duration_seconds"])
-            max_gap_seconds = int(delivery_rules["max_sample_gap_seconds"])
     reading_time = parse_reading_time(reading.timestamp)
     timestamp_text = reading_time.isoformat().replace("+00:00", "Z")
     active = conn.execute(
@@ -382,11 +361,6 @@ def evaluate_temperature(conn: sqlite3.Connection, reading: ReadingIn) -> None:
     outside = is_out_of_range(reading.temperature_f, low, high)
     pending_start = excursion["pending_started_at"] if excursion else None
     last_observed = excursion["last_observed_at"] if excursion else None
-    if last_observed:
-        gap = (reading_time - parse_reading_time(last_observed)).total_seconds()
-        if gap > max_gap_seconds:
-            pending_start = None
-
     if not outside:
         if active is not None:
             conn.execute(
@@ -623,8 +597,7 @@ def build_delivery_report(conn: sqlite3.Connection, delivery: sqlite3.Row) -> di
     temperatures = [float(row["temperature_f"]) for row in readings]
     low, high = float(delivery["threshold_min_f"]), float(delivery["threshold_max_f"])
     required_duration = int(delivery["excursion_duration_seconds"])
-    max_sample_gap = int(delivery["max_sample_gap_seconds"])
-    excursions = calculate_temperature_excursions(readings, low, high, required_duration, max_sample_gap)
+    excursions = calculate_temperature_excursions(readings, low, high, required_duration)
 
     expected = None
     observed_sequences = set()
@@ -645,11 +618,11 @@ def build_delivery_report(conn: sqlite3.Connection, delivery: sqlite3.Row) -> di
 
     if delivery["status"] != "completed":
         result = "IN_PROGRESS"
-    elif excursions:
+    elif any(item["qualifies_for_failure"] for item in excursions):
         result = "FAIL"
-    elif not readings or not coverage_complete:
-        result = "INCONCLUSIVE"
     else:
+        # Gaps, missing sequence numbers, and empty/partial telemetry do not
+        # change the requested temperature-only PASS/FAIL decision.
         result = "PASS"
 
     return {
@@ -662,7 +635,6 @@ def build_delivery_report(conn: sqlite3.Connection, delivery: sqlite3.Row) -> di
         "threshold_min_f": low,
         "threshold_max_f": high,
         "excursion_duration_seconds": required_duration,
-        "max_sample_gap_seconds": max_sample_gap,
         "reading_count": len(readings),
         "minimum_temperature_f": min(temperatures) if temperatures else None,
         "maximum_temperature_f": max(temperatures) if temperatures else None,
@@ -701,10 +673,10 @@ def start_delivery(body: DeliveryStart, device_id: str = Query(min_length=1)):
         conn.execute("DELETE FROM excursion_state WHERE device_id=?", (device_id,))
         try:
             conn.execute(
-                "INSERT INTO deliveries(delivery_id, device_id, status, started_at, start_sequence, threshold_min_f, threshold_max_f, excursion_duration_seconds, max_sample_gap_seconds) "
-                "VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO deliveries(delivery_id, device_id, status, started_at, start_sequence, threshold_min_f, threshold_max_f, excursion_duration_seconds) "
+                "VALUES (?, ?, 'active', ?, ?, ?, ?, ?)",
                 (body.delivery_id, device_id, utc_now(), start_sequence, state["minimum_f"], state["maximum_f"],
-                 state["excursion_duration_seconds"], state["max_sample_gap_seconds"]),
+                 state["excursion_duration_seconds"]),
             )
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="This device already has an active delivery.")
@@ -771,6 +743,103 @@ def get_delivery_report(delivery_id: str):
         return build_delivery_report(conn, delivery)
 
 
+def render_delivery_pdf(report: dict) -> bytes:
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(buffer, pagesize=letter, title=f"Meridian Delivery {report['delivery_id']} Report")
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Meridian Cold-Chain Monitor", styles["Title"]),
+        Paragraph(f"Delivery Report: {report['delivery_id']}", styles["Heading2"]),
+        Paragraph(f"Result: <b>{report['result']}</b>", styles["Heading2"]),
+        Spacer(1, 10),
+    ]
+    summary_rows = [
+        ["Device", report["device_id"], "Status", report["status"]],
+        ["Started", report["started_at"], "Completed", report["completed_at"] or "Not completed"],
+        ["Allowed range", f"{report['threshold_min_f']:.1f}–{report['threshold_max_f']:.1f} °F", "Readings", str(report["reading_count"])],
+        ["Minimum observed", "—" if report["minimum_temperature_f"] is None else f"{report['minimum_temperature_f']:.1f} °F",
+         "Maximum observed", "—" if report["maximum_temperature_f"] is None else f"{report['maximum_temperature_f']:.1f} °F"],
+        ["Average observed", "—" if report["average_temperature_f"] is None else f"{report['average_temperature_f']:.1f} °F",
+         "Sequence gaps", str(len(report["open_gaps"]))],
+        ["Required excursion", f"{report['excursion_duration_seconds']} seconds", "Decision rule", "Sustained excursion"],
+    ]
+    summary = Table(summary_rows, colWidths=[105, 175, 90, 150])
+    summary.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.lightgrey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.extend([summary, Spacer(1, 14), Paragraph("Temperature exceptions", styles["Heading2"])])
+    if report["temperature_excursions"]:
+        exception_rows = [["First observed", "Last observed", "Type", "Duration (s)", "Qualifies", "Readings"]]
+        for item in report["temperature_excursions"]:
+            exception_rows.append([
+                item["started_at"], item["ended_at"], item["type"].replace("_", " "),
+                str(item["duration_seconds"]), "Yes" if item["qualifies_for_failure"] else "No", str(item["reading_count"]),
+            ])
+        exceptions = Table(exception_rows, repeatRows=1)
+        exceptions.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef2")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.lightgrey),
+            ("PADDING", (0, 0), (-1, -1), 5),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(exceptions)
+    else:
+        story.append(Paragraph("No recorded temperatures were outside the configured range.", styles["BodyText"]))
+    story.extend([Spacer(1, 10), Paragraph("Telemetry gaps", styles["Heading2"])])
+    if report["open_gaps"]:
+        story.append(Paragraph(
+            "Open sequence gaps were detected. Under the requested report rule, gaps do not change PASS/FAIL; only sustained out-of-range episodes reaching the configured duration cause FAIL.",
+            styles["BodyText"],
+        ))
+        story.append(Paragraph(", ".join(str(gap["sequence"]) for gap in report["open_gaps"]), styles["BodyText"]))
+    else:
+        story.append(Paragraph("No unresolved sequence gaps were recorded.", styles["BodyText"]))
+    story.extend([Spacer(1, 10), Paragraph("Reading details", styles["Heading2"])])
+    reading_rows = [["Timestamp (UTC)", "Sequence", "Temperature (°F)", "Humidity (%)"]]
+    for reading in report.get("readings", []):
+        reading_rows.append([
+            reading["timestamp"], str(reading["sequence"] if reading["sequence"] is not None else "—"),
+            f"{reading['temperature_f']:.1f}", f"{reading['humidity_percent']:.1f}",
+        ])
+    if len(reading_rows) == 1:
+        reading_rows.append(["No readings recorded", "—", "—", "—"])
+    reading_table = Table(reading_rows, repeatRows=1, colWidths=[250, 70, 100, 90])
+    reading_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef2")),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.lightgrey),
+        ("PADDING", (0, 0), (-1, -1), 4),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+    ]))
+    story.extend([reading_table, Spacer(1, 14), Paragraph(
+        "Educational prototype only. This report is not a validated pharmaceutical safety or regulatory-compliance determination. Missing telemetry is not represented as measured temperature.",
+        styles["Italic"],
+    )])
+    document.build(story)
+    return buffer.getvalue()
+
+
+@app.get("/api/v1/deliveries/{delivery_id}/report.pdf")
+def download_delivery_pdf(delivery_id: str):
+    with closing(get_connection()) as conn:
+        delivery = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
+        if delivery is None:
+            raise HTTPException(status_code=404, detail="Delivery not found.")
+        report = build_delivery_report(conn, delivery)
+        readings = conn.execute(
+            "SELECT record_id, sequence, timestamp, temperature_f, humidity_percent "
+            "FROM readings WHERE delivery_id=? ORDER BY timestamp, sequence", (delivery_id,),
+        ).fetchall()
+        report["readings"] = [dict(row) for row in readings]
+    pdf = render_delivery_pdf(report)
+    filename = f"meridian-delivery-{delivery_id}.pdf"
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    })
+
+
 @app.get("/api/v1/devices")
 def list_devices():
     with closing(get_connection()) as conn:
@@ -829,7 +898,6 @@ def get_thresholds(device_id: str = Query(min_length=1)):
         conn.commit()
     return {"device_id": device_id, "minimum_f": state["minimum_f"], "maximum_f": state["maximum_f"],
             "excursion_duration_seconds": state["excursion_duration_seconds"],
-            "max_sample_gap_seconds": state["max_sample_gap_seconds"],
             "note": "Defaults are illustrative; configure validated limits for the intended use."}
 
 
@@ -838,9 +906,8 @@ def update_thresholds(thresholds: ThresholdUpdate, device_id: str = Query(min_le
     with closing(get_connection()) as conn:
         ensure_device(conn, device_id)
         conn.execute(
-            "UPDATE device_state SET minimum_f=?, maximum_f=?, excursion_duration_seconds=?, max_sample_gap_seconds=? WHERE device_id=?",
-            (thresholds.minimum_f, thresholds.maximum_f, thresholds.excursion_duration_seconds,
-             thresholds.max_sample_gap_seconds, device_id),
+            "UPDATE device_state SET minimum_f=?, maximum_f=?, excursion_duration_seconds=? WHERE device_id=?",
+            (thresholds.minimum_f, thresholds.maximum_f, thresholds.excursion_duration_seconds, device_id),
         )
         # Existing active delivery rules are immutable snapshots. Only reset a
         # pending, not-yet-confirmed device-level excursion for future readings.
@@ -852,7 +919,7 @@ def update_thresholds(thresholds: ThresholdUpdate, device_id: str = Query(min_le
         conn.commit()
     return {"device_id": device_id, "minimum_f": thresholds.minimum_f, "maximum_f": thresholds.maximum_f,
             "excursion_duration_seconds": thresholds.excursion_duration_seconds,
-            "max_sample_gap_seconds": thresholds.max_sample_gap_seconds}
+            }
 
 
 @app.post("/api/v1/notifications/retry")
