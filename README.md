@@ -74,6 +74,9 @@ Check the labels and electrical requirements on your exact breakout boards befor
 
 **Disconnect USB power before changing wiring.** More detailed notes are in [`hardware/README.md`](hardware/README.md) and [`hardware/pinout.md`](hardware/pinout.md).
 
+### ESP32 wiring image
+<img width="2256" height="2038" alt="PXL_20261115_212943086" src="https://github.com/user-attachments/assets/4d990af9-3bd7-4c86-bfc5-4fe1a315c2c1" />
+
 ## Software stack
 
 | Layer | Technology |
