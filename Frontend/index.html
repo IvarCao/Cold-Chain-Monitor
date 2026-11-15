@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meridian | Cold-Chain Monitor</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><p class="eyebrow">EMBEDDED IOT MONITORING</p><h1>Meridian</h1></div>
+    <span id="connection" class="status status-unknown">Checking API…</span>
+  </header>
+  <main>
+    <section class="intro">
+      <div><h2>Monitoring overview</h2><p>Temperature and humidity received from ESP32 devices.</p></div>
+      <button id="refresh">Refresh data</button>
+    </section>
+    <section class="cards">
+      <article class="metric"><p>Latest temperature</p><strong id="temperature">—</strong><span>°F</span></article>
+      <article class="metric"><p>Latest humidity</p><strong id="humidity">—</strong><span>% RH</span></article>
+      <article class="metric"><p>Device</p><strong id="device">—</strong><span id="last-seen">No readings yet</span></article>
+      <article class="metric"><p>Stored readings</p><strong id="count">0</strong><span>records</span></article>
+    </section>
+    <section class="panel delivery-panel">
+      <div class="panel-heading"><h2>Delivery management</h2><span id="delivery-status" class="status status-unknown">No active delivery</span></div>
+      <p class="note">One ESP32 monitors one delivery at a time. Start a delivery before collecting its readings; complete it after the ESP32 has uploaded its offline queue.</p>
+      <div class="delivery-controls">
+        <label for="delivery-device-id">ESP32 device ID</label>
+        <input id="delivery-device-id" type="text" maxlength="100" value="ESP32-001">
+        <label for="delivery-id">New delivery ID</label>
+        <input id="delivery-id" type="text" maxlength="100" placeholder="e.g. DEL-2026-001">
+        <button id="start-delivery">Start delivery</button>
+        <button id="complete-delivery" class="button-secondary" disabled>Complete active delivery</button>
+      </div>
+      <p id="delivery-message" class="note" role="status"></p>
+      <h3>Delivery history</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Delivery ID</th><th>Started</th><th>Completed</th><th>Readings</th><th>Report</th><th>Details</th></tr></thead>
+          <tbody id="deliveries-body"><tr><td colspan="6">No deliveries yet.</td></tr></tbody>
+        </table>
+      </div>
+      <div id="delivery-detail" class="delivery-detail" hidden>
+        <div class="panel-heading"><h3 id="delivery-detail-title">Delivery report</h3><span id="delivery-result" class="status status-unknown">—</span><a id="download-delivery-pdf" class="button-link" href="#" hidden>Download PDF</a></div>
+        <div id="delivery-summary" class="report-grid"></div>
+        <div id="delivery-warnings" class="message-list"></div>
+        <div class="chart-wrap"><canvas id="delivery-chart"></canvas></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Timestamp (UTC)</th><th>Sequence</th><th>Temperature</th><th>Humidity</th></tr></thead>
+            <tbody id="delivery-readings-body"></tbody></table>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Temperature alert settings</h2>
+      <p class="note">Delivery reports FAIL only when recorded temperatures remain outside the allowed range for at least the configured excursion duration. Brief spikes PASS. Missing readings and sequence gaps do not independently change PASS/FAIL.</p>
+      <div class="delivery-controls rule-controls">
+        <label for="rules-device-id">ESP32 device ID</label>
+        <input id="rules-device-id" type="text" maxlength="100" value="ESP32-001">
+        <label for="rules-minimum">Minimum temperature (°F)</label>
+        <input id="rules-minimum" type="number" step="0.1" value="35.6">
+        <label for="rules-maximum">Maximum temperature (°F)</label>
+        <input id="rules-maximum" type="number" step="0.1" value="46.4">
+        <label for="rules-duration">Excursion duration for alerts and delivery reports (seconds)</label>
+        <input id="rules-duration" type="number" min="1" max="86400" step="1" value="120">
+        <button id="save-rules">Save monitoring rules</button>
+      </div>
+      <p id="rules-message" class="note" role="status">Loading monitoring rules…</p>
+      <p class="note">Temperature limits are snapshotted when a delivery starts. The same duration setting applies to email alerts and delivery PASS/FAIL; it is saved when a delivery starts.</p>
+    </section>
+    <section class="panel alert-panel">
+      <div class="panel-heading"><h2>Active temperature alerts</h2><span id="alert-count" class="status status-unknown">Checking…</span></div>
+      <div id="alerts-list" class="message-list"><p class="note">Loading alerts…</p></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><h2>Telemetry coverage gaps</h2><span id="gap-count" class="status status-unknown">Checking…</span></div>
+      <div id="gaps-list" class="message-list"><p class="note">Loading coverage…</p></div>
+    </section>
+    <section class="panel">
+      <h2>Temperature history</h2>
+      <p>Recent readings stored by the Raspberry Pi.</p>
+      <div class="chart-wrap"><canvas id="temperature-chart"></canvas></div>
+      <p id="coverage-note" class="note">No data available.</p>
+    </section>
+    <section class="panel">
+      <h2>Recent readings</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Timestamp (UTC)</th><th>Device</th><th>Temperature</th><th>Humidity</th><th>Record ID</th></tr></thead>
+          <tbody id="readings-body"><tr><td colspan="5">No readings yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <p class="disclaimer">Educational prototype only. Not validated for medication-safety or regulatory-compliance decisions. Missing data means unknown monitoring coverage.</p>
+  </main>
+  <script src="/js/dashboard.js"></script>
+</body>
+</html>
