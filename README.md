@@ -124,12 +124,16 @@ The dashboard supports one active delivery per ESP32. Start a delivery with a un
 | Result | Meaning |
 |---|---|
 | `IN_PROGRESS` | The delivery has not been completed. |
-| `PASS` | No received reading was below the configured minimum or above the configured maximum. |
-| `FAIL` | At least one received reading was below the configured minimum or above the configured maximum. |
+| `PASS` | 	No observed out-of-range episode lasts at least the configured excursion duration. Brief spikes do not fail a delivery. |
+| `FAIL` | 	At least one observed out-of-range episode spans the configured excursion duration or longer. |
 
-A single brief out-of-range reading is enough to produce `FAIL`. The email-alert confirmation duration does not delay or change the delivery result.
+**One shared duration setting:** `excursion_duration_seconds` governs both email alert confirmation and delivery PASS/FAIL. The default is **120 seconds**. When a delivery starts, its minimum/maximum thresholds and excursion duration are saved with that delivery; changing settings later does not retroactively change its rules.
 
-**Telemetry gaps do not change PASS/FAIL.** Missing sequence numbers, unresolved gaps, incomplete coverage, an empty delivery, or an unconfirmed queue-drain checkbox do not by themselves cause a failure. Gaps are still shown as informational coverage warnings in the dashboard and PDF. Therefore, `PASS` does not establish that the temperature remained in range during periods when no reading was received.
+The report sorts received readings by their measurement timestamps and groups consecutive out-of-range readings into episodes. An in-range reading ends an episode. The episode duration is the elapsed time between its first and last observed out-of-range timestamps; a lone out-of-range reading has a measured duration of zero seconds. For example, with a 30-second setting, out-of-range readings at 12:00:00 and 12:00:30 in the same episode cause FAIL, while a brief spike followed by an in-range reading does not.
+
+**Coverage caveat:** No maximum sample-gap rule is enforced. Two out-of-range observations separated by missing telemetry can count toward the elapsed duration, but missing data cannot prove that the temperature stayed out of range between them. Review gap warnings when interpreting results.
+
+**Telemetry gaps do not independently change PASS/FAIL.** Missing sequence numbers, unresolved gaps, incomplete coverage, an empty delivery, or an unconfirmed queue-drain checkbox do not by themselves cause a failure. Gaps are still shown as informational coverage warnings in the dashboard and PDF. Therefore, `PASS` does not establish that the temperature remained in range during periods when no reading was received, or that no brief excursion occurred.
 
 ### Important delivery-association limitation
 
@@ -139,14 +143,15 @@ The current ESP32 firmware does not store and transmit a `delivery_id` with each
 
 ## Temperature thresholds and email alerts
 
-The illustrative default temperature range is **35.6–46.4 °F**. Thresholds are configurable per device through the dashboard or API. The default email-alert confirmation duration is **120 seconds**.
+The illustrative default temperature range is **35–45 °F**. Thresholds are configurable per device through the dashboard or API. The default shared excursion duration is **120 seconds**.
 
-The confirmation duration applies to email notifications only:
+The **same `excursion_duration_seconds` setting** applies to email alerts and delivery results:
 
 - An out-of-range reading starts a potential alert period.
-- A later out-of-range reading after the configured duration confirms the alert.
-- A reading back within range resets an unconfirmed alert timer.
-- Delivery reports still fail immediately if any recorded reading is out of range.
+- A later out-of-range reading after the configured duration can confirm an email alert.
+- An in-range reading resets an unconfirmed email alert timer and breaks a delivery-report excursion episode.
+- A completed delivery fails only when an observed out-of-range episode spans at least the configured duration.
+- Email alerts are processed as readings arrive; delivery reports evaluate stored measurement timestamps. As a result, alert notification timing and report evaluation are related but not identical.
 
 To enable email notifications, configure these environment variables for the backend service:
 
@@ -160,6 +165,7 @@ SMTP_PASSWORD=your-smtp-password
 ```
 
 Use your provider's supported SMTP credentials or app password. Keep secrets out of source control. Pending alert and recovery notifications are stored in a queue and retried by a background worker approximately once per minute. The API also provides a manual retry endpoint.
+
 
 ## API overview
 
@@ -182,7 +188,6 @@ The interactive API reference is available at `/docs` while the backend is runni
 | `GET` | `/api/v1/deliveries/{delivery_id}/report.pdf` | Download a PDF report |
 | `POST` | `/api/v1/notifications/retry` | Retry queued notifications |
 
-See [`documentation/api_documentation.md`](documentation/api_documentation.md) for request examples and detailed behavior.
 
 ## Run backend tests
 
@@ -216,13 +221,3 @@ The test suite covers reading ingestion, duplicate handling, sequence gaps and r
 - Improve sensor accuracy and add calibration/validation procedures before considering higher-assurance use.
 - Add HTTPS and authentication for secure network communication.
 - Consider OTA firmware updates, configurable sampling intervals, and bounded-queue health reporting.
-
-## Additional documentation
-
-- [System architecture](documentation/system_architecture.md)
-- [API documentation](documentation/api_documentation.md)
-- [Project structure](documentation/project_structure.md)
-- [Testing plan](documentation/testing_plan.md)
-- [Troubleshooting](documentation/troubleshooting.md)
-- [Hardware notes](hardware/README.md)
-- [Firmware notes](firmware/README.md)
