@@ -221,3 +221,6 @@ The test suite covers reading ingestion, duplicate handling, sequence gaps and r
 - Improve sensor accuracy and add calibration/validation procedures before considering higher-assurance use.
 - Add HTTPS and authentication for secure network communication.
 - Consider OTA firmware updates, configurable sampling intervals, and bounded-queue health reporting.
+
+  ## AI Usage
+  Used Copilot within VS Code to solve a compiling issue related to PlatformIO. Used CodeX to help create the  frontend to work with the backend created. Used CodeX to create API and behavior tests for the backend. 
