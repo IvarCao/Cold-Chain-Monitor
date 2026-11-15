@@ -1,327 +1,228 @@
-# Cold-Chain-Monitor
+# Meridian Cold-Chain Monitor
 
-### Embedded Temperature Monitoring and Data Logging for Cold-Chain Deliveries
+An embedded IoT project for collecting, buffering, transmitting, and reviewing temperature readings during simulated cold-chain deliveries.
 
-## Overview
+The system uses an **ESP32**, a **DHT11 temperature/humidity sensor**, and a **DS3231 real-time clock** to collect readings every five seconds. Readings are first saved to the ESP32's internal flash using LittleFS, then uploaded over Wi-Fi to a **Raspberry Pi 4** running a **FastAPI** backend and **SQLite** database. A browser-based dashboard displays device telemetry, alerts, delivery history, and downloadable PDF reports.
 
-The Cold-Chain Monitor is an embedded temperature-monitoring system designed to demonstrate how environmental data can be collected, timestamped, stored, and transmitted during temperature-sensitive deliveries.
+> **Prototype disclaimer:** This is a portfolio project, not a validated pharmaceutical monitoring instrument. The DHT11 is a low-cost sensor and is not suitable for demonstrating medication safety or regulatory compliance. A `PASS` result means only that none of the readings received by the backend were outside the configured range. Missing readings and telemetry gaps represent unknown monitoring coverage; they do not prove that temperatures remained safe.
 
-The system uses an **ESP32 microcontroller** to collect temperature and humidity readings from a DHT11 sensor at five-second intervals. Readings are timestamped using a DS3231 real-time clock (RTC) and transmitted over Wi-Fi to a Raspberry Pi running a Python-based backend.
+## Highlights
 
-When network connectivity is unavailable, the ESP32 temporarily stores readings in its internal flash memory and attempts to transmit them once the connection is restored.
+- **Embedded data collection:** ESP32 firmware reads temperature and humidity every five seconds.
+- **Real-time timestamps:** DS3231 timestamps are represented as ISO 8601 UTC values.
+- **Offline buffering:** LittleFS stores readings locally when Wi-Fi or the backend is unavailable.
+- **Retry-safe ingestion:** Unique record IDs and per-device sequence numbers support idempotent uploads and duplicate detection.
+- **Telemetry-gap tracking:** Missing sequence numbers are recorded, and late-arriving readings can recover previously detected gaps.
+- **Configurable temperature thresholds:** Minimum and maximum Fahrenheit thresholds are configurable per device.
+- **Email notifications:** Temperature alerts and recovery notifications are queued and retried when SMTP is configured.
+- **Delivery tracking:** Start and complete delivery records and review their readings and temperature statistics.
+- **PDF reports:** Download a delivery report containing the result, temperature summary, out-of-range readings, and telemetry gaps.
+- **Automated backend tests:** API behavior is covered by a pytest test suite and a GitHub Actions workflow.
 
-A locally hosted web dashboard allows users to view current sensor readings, historical temperature data, device status, and recent monitoring activity.
+## System architecture
 
-This project is intended as an educational embedded-systems and software-engineering prototype, not a certified pharmaceutical monitoring device.
-
-## Project Goals
-
-- Develop embedded firmware using C++ on the ESP32.
-- Interface with digital environmental sensors and an RTC module.
-- Implement periodic sensor sampling and timestamped data collection.
-- Transmit sensor readings to a Raspberry Pi over Wi-Fi.
-- Implement local data buffering for temporary network outages.
-- Prevent duplicate records when buffered readings are retransmitted.
-- Develop a Python backend with persistent SQLite storage.
-- Build a local web dashboard for monitoring and visualizing collected data.
-
-## System Architecture
-
-```text
-         SENSOR LAYER
-    ┌─────────────────────┐
-    │       DHT11         │
-    │ Temperature/Humidity│
-    └──────────┬──────────┘
-               │
-    ┌──────────▼──────────┐
-    │       DS3231        │
-    │   Real-Time Clock   │
-    └──────────┬──────────┘
-               │ I2C / GPIO
-               ▼
-         ESP32 FIRMWARE
-    ┌─────────────────────┐
-    │ Sensor Acquisition  │
-    │ Timestamp Generation│
-    │ Data Processing     │
-    │ LittleFS Data Queue │
-    └──────────┬──────────┘
-               │
-          Wi-Fi / HTTP
-               │
-               ▼
-       RASPBERRY PI 4
-    ┌─────────────────────┐
-    │ Python / FastAPI    │
-    │ REST API            │
-    │ SQLite Database     │
-    └──────────┬──────────┘
-               │
-               ▼
-        LOCAL DASHBOARD
-    ┌─────────────────────┐
-    │ HTML / CSS / JS     │
-    │ Temperature History │
-    │ Device Status       │
-    │ Recent Readings     │
-    └─────────────────────┘
+```mermaid
+flowchart LR
+    A[DHT11 Sensor] --> B[ESP32 Firmware]
+    C[DS3231 RTC] --> B
+    B --> D[LittleFS Offline Queue]
+    D -->|Wi-Fi / HTTP| E[FastAPI on Raspberry Pi]
+    E --> F[(SQLite Database)]
+    E --> G[Web Dashboard]
+    E --> H[Email Notification Queue]
+    E --> I[PDF Delivery Reports]
 ```
 
-## Hardware Components
+### Data flow
+
+1. The ESP32 samples the DHT11 at the configured interval.
+2. The DS3231 provides the reading timestamp.
+3. The firmware writes the reading to the LittleFS queue before attempting transmission.
+4. When the network is available, the ESP32 posts queued readings to `POST /api/v1/readings`.
+5. The API validates the payload and stores it in SQLite. Duplicate retries are acknowledged without inserting duplicate rows.
+6. The dashboard requests device, reading, alert, gap, and delivery information from the API.
+7. Completed deliveries can be reviewed and exported as PDF reports.
+
+## Hardware
+
+### Components
 
 | Component | Purpose |
 |---|---|
-| ESP32 DevKitC | Main microcontroller and Wi-Fi communication |
-| DHT11 Sensor | Temperature and humidity measurements |
-| DS3231 RTC | Maintains wall-clock timestamps |
-| Raspberry Pi 4 | Hosts the backend and dashboard |
-| Jumper Wires | Hardware connections |
+| ESP32-DevKitC-VIE development board | Main microcontroller and Wi-Fi connectivity |
+| DHT11 module | Temperature and relative-humidity readings |
+| DS3231 RTC breakout | Wall-clock timestamps |
+| Breadboard and jumper wires | Prototyping connections |
+| USB data cable | Power, firmware upload, and serial monitoring |
+| Raspberry Pi 4 | Hosts the API, SQLite database, and dashboard |
 
-### Pin Configuration
+The project uses the ESP32's internal flash for offline storage; **a microSD module is not required**.
 
-| Component | ESP32 Pin |
-|---|---|
-| DHT11 Data | GPIO 4 |
-| DS3231 SDA | GPIO 21 |
-| DS3231 SCL | GPIO 22 |
-| Sensor Power | 3.3V |
-| Ground | GND |
+### ESP32 wiring
 
-## Software and Technologies
-
-**Embedded Firmware**
-- C++
-- Arduino Framework
-- PlatformIO
-- ESP32
-- Adafruit DHT Sensor Library
-- RTClib
-- ArduinoJson
-- LittleFS
-
-**Backend**
-- Python
-- FastAPI
-- SQLite
-- Uvicorn
-- Pytest
-
-**Frontend**
-- HTML
-- CSS
-- JavaScript
-- Chart.js
-
-**Development Tools**
-- Visual Studio Code
-- PlatformIO IDE
-- Git and GitHub
-- Raspberry Pi OS
-
-## Key Features
-
-### 1. Periodic Sensor Monitoring
-
-The ESP32 reads temperature and humidity from the DHT11 sensor every five seconds. Each valid reading is associated with a timestamp from the DS3231 RTC.
-
-### 2. Offline Data Buffering
-
-The firmware uses the ESP32's internal flash storage through LittleFS to temporarily queue readings when Wi-Fi or backend connectivity is unavailable.
-
-Once connectivity is restored, the ESP32 attempts to transmit the stored readings to the backend.
-
-### 3. Reliable Data Transmission
-
-Each reading receives a unique record identifier. The backend uses this identifier to prevent duplicate database entries when the ESP32 retries a transmission.
-
-Buffered readings are retained until the backend acknowledges successful receipt.
-
-### 4. REST API and Data Storage
-
-The Raspberry Pi hosts a FastAPI application that receives sensor data and stores it in an SQLite database.
-
-Current API endpoints:
-
-| Method | Endpoint | Description |
+| Module | Pin | ESP32 connection |
 |---|---|---|
-| GET | `/api/v1/health` | Checks backend availability |
-| POST | `/api/v1/readings` | Receives a sensor reading |
-| GET | `/api/v1/readings` | Retrieves historical readings |
-| GET | `/api/v1/devices` | Retrieves registered devices |
+| DHT11 module | VCC / `+` | 3V3 |
+| DHT11 module | DATA / `S` / `OUT` | GPIO 5 |
+| DHT11 module | GND / `-` | GND |
+| DS3231 | VCC | 3V3, only if supported by the exact breakout |
+| DS3231 | GND | GND |
+| DS3231 | SDA | GPIO 21 |
+| DS3231 | SCL | GPIO 22 |
 
-### 5. Local Monitoring Dashboard
+Check the labels and electrical requirements on your exact breakout boards before connecting them. Some DHT11 modules include a DATA pull-up resistor; if yours does not, add a 4.7 kΩ–10 kΩ resistor between DATA and 3V3. Confirm that the DS3231 breakout's I²C pull-ups are compatible with 3.3 V logic. Its typical I²C address is `0x68`.
 
-The dashboard provides a browser-based interface for viewing:
-- Latest temperature and humidity readings.
-- Historical temperature trends.
-- Device information and status.
-- Total recorded measurements.
-- Recent sensor readings.
+**Disconnect USB power before changing wiring.** More detailed notes are in [`hardware/README.md`](hardware/README.md) and [`hardware/pinout.md`](hardware/pinout.md).
 
-## Repository Structure
+## Software stack
+
+| Layer | Technology |
+|---|---|
+| Microcontroller | ESP32 / Arduino framework |
+| Firmware language | C++ |
+| Firmware build system | PlatformIO |
+| Sensor | DHT11 |
+| Real-time clock | DS3231 / RTClib |
+| Offline storage | LittleFS |
+| Device communication | Wi-Fi and HTTP REST |
+| Backend | Python, FastAPI, Pydantic |
+| Database | SQLite |
+| Dashboard | HTML, CSS, JavaScript |
+| PDF generation | ReportLab |
+| Deployment | Docker Compose or direct Python/Uvicorn |
+| Backend tests | pytest and httpx |
+
+## Repository structure
 
 ```text
-meridian-cold-chain-monitor/
-│
+.
+├── backend/
+│   ├── app/main.py          # FastAPI application, database logic, reports
+│   └── tests/test_api       # API and behavior tests
 ├── firmware/
 │   ├── platformio.ini
-│   └── src/
-│       ├── config.h
-│       └── main.cpp
-│
-├── backend/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   └── main.py
-│   ├── tests/
-│   │   └── test_api.py
-│   ├── requirements.txt
-│   └── requirements-dev.txt
-│
+│   ├── include/
+│   └── src/                  # Modular ESP32 firmware
 ├── frontend/
 │   ├── index.html
-│   ├── css/
-│   │   └── style.css
-│   └── js/
-│       └── dashboard.js
-│
-├── hardware/
-│   ├── README.md
+│   ├── css/style.css
+│   └── js/dashboard.js
+├── hardware/                 # Bill of materials and wiring references
+│   ├──README.md
 │   └── pinout.md
-│
-├── documentation/
-│   ├── system_architecture.md
-│   ├── api_documentation.md
-│   ├── testing_plan.md
-│   └── troubleshooting.md
-│
-├── scripts/
-│   ├── setup_pi.sh
-│   ├── start_backend.sh
-│   └── backup_database.sh
-│
-├── .github/
-│   └── workflows/
-│       └── backend-tests.yml
-│
-├── .gitignore
-├── docker-compose.yml
-├── LICENSE
 └── README.md
+
 ```
 
-## Getting Started
 
-### Prerequisites
+## Delivery results and PDF reports
 
-Before setting up the project, make sure you have:
+The dashboard supports one active delivery per ESP32. Start a delivery with a unique delivery ID before monitoring begins. After the delivery, review the readings and complete the delivery to generate its final result. A PDF report can be downloaded from the delivery history or detail view.
 
-- ESP32 development board.
-- DHT11 temperature and humidity sensor.
-- DS3231 RTC module.
-- Raspberry Pi 4 running Raspberry Pi OS.
-- A shared local Wi-Fi network.
-- Visual Studio Code with PlatformIO installed.
-- Python 3.10 or newer.
-- Git installed.
+### Result rules
 
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/YOUR-USERNAME/meridian-cold-chain-monitor.git
-cd meridian-cold-chain-monitor
-```
-
-Replace `YOUR-USERNAME` with your GitHub username.
-
-### 2. Configure the ESP32
-
-Open the `firmware` directory in Visual Studio Code using PlatformIO.
-
-Edit `firmware/src/config.h` and configure:
-
-- Your Wi-Fi network name.
-- Your Wi-Fi password.
-- Your Raspberry Pi's local IP address.
-- A unique device identifier.
-
-Build and upload the firmware using PlatformIO.
-
-### 3. Set Up the Raspberry Pi Backend
-
-On the Raspberry Pi, clone the repository and navigate to the project directory.
-
-Create and activate a Python virtual environment:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Install the backend dependencies:
-
-```bash
-pip install -r backend/requirements.txt
-```
-
-Start the backend:
-
-```bash
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
-```
-
-The backend should now be accessible on your local network.
-
-### 4. Access the Dashboard
-
-Open a browser on a device connected to the same local network.
-
-Navigate to:
-
-```text
-http://RASPBERRY_PI_IP:8000/
-```
-
-Replace `RASPBERRY_PI_IP` with your Raspberry Pi's local IP address.
-
-Additional endpoints:
-
-```text
-http://RASPBERRY_PI_IP:8000/docs
-http://RASPBERRY_PI_IP:8000/api/v1/health
-```
-
-The first address opens the monitoring dashboard, while `/docs` provides the interactive API documentation.
-
-## Running Tests
-
-The backend includes automated tests for API functionality and duplicate-reading prevention.
-
-Install development dependencies:
-
-```bash
-pip install -r backend/requirements-dev.txt
-```
-
-Run the test suite:
-
-```bash
-pytest backend/tests/
-```
-
-## Current Development Status
-
-| Feature | Status |
+| Result | Meaning |
 |---|---|
-| ESP32 firmware foundation | Initial implementation |
-| DHT11 sensor integration | Pending hardware validation |
-| DS3231 RTC integration | Pending hardware validation |
-| Five-second sampling interval | Implemented in firmware |
-| Wi-Fi communication | Implemented in firmware |
-| LittleFS offline buffering | Implemented in firmware; hardware validation pending |
-| FastAPI backend | Initial implementation |
-| SQLite data storage | Initial implementation |
-| Duplicate-reading prevention | Implemented in backend |
-| Local web dashboard | Initial implementation |
-| End-to-end hardware testing | Pending |
+| `IN_PROGRESS` | The delivery has not been completed. |
+| `PASS` | No received reading was below the configured minimum or above the configured maximum. |
+| `FAIL` | At least one received reading was below the configured minimum or above the configured maximum. |
+
+A single brief out-of-range reading is enough to produce `FAIL`. The email-alert confirmation duration does not delay or change the delivery result.
+
+**Telemetry gaps do not change PASS/FAIL.** Missing sequence numbers, unresolved gaps, incomplete coverage, an empty delivery, or an unconfirmed queue-drain checkbox do not by themselves cause a failure. Gaps are still shown as informational coverage warnings in the dashboard and PDF. Therefore, `PASS` does not establish that the temperature remained in range during periods when no reading was received.
+
+### Important delivery-association limitation
+
+The current ESP32 firmware does not store and transmit a `delivery_id` with each queued reading. Instead, the backend associates a reading with whichever delivery is active for that device when the reading arrives.
+
+**Before completing a delivery, reconnect the ESP32 and allow its LittleFS backlog to upload. Do not start the next delivery until the previous delivery's queue has drained.** Otherwise, delayed readings from the previous trip could be associated with the next delivery. Persisting a delivery ID in every queued firmware record is a planned improvement.
+
+## Temperature thresholds and email alerts
+
+The illustrative default temperature range is **35.6–46.4 °F**. Thresholds are configurable per device through the dashboard or API. The default email-alert confirmation duration is **120 seconds**.
+
+The confirmation duration applies to email notifications only:
+
+- An out-of-range reading starts a potential alert period.
+- A later out-of-range reading after the configured duration confirms the alert.
+- A reading back within range resets an unconfirmed alert timer.
+- Delivery reports still fail immediately if any recorded reading is out of range.
+
+To enable email notifications, configure these environment variables for the backend service:
+
+```text
+ALERT_EMAIL_TO=operator@example.com
+ALERT_EMAIL_FROM=meridian@example.com
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+```
+
+Use your provider's supported SMTP credentials or app password. Keep secrets out of source control. Pending alert and recovery notifications are stored in a queue and retried by a background worker approximately once per minute. The API also provides a manual retry endpoint.
+
+## API overview
+
+The interactive API reference is available at `/docs` while the backend is running. Common endpoints include:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/health` | Backend health check |
+| `POST` | `/api/v1/readings` | Submit a sensor reading |
+| `GET` | `/api/v1/readings` | List stored readings |
+| `GET` | `/api/v1/devices` | List known devices |
+| `GET` | `/api/v1/alerts` | Review temperature alerts |
+| `GET` | `/api/v1/gaps` | Review open or recovered telemetry gaps |
+| `GET` | `/api/v1/settings/thresholds` | Read device thresholds |
+| `PUT` | `/api/v1/settings/thresholds` | Update device thresholds |
+| `POST` | `/api/v1/deliveries/start` | Start a delivery |
+| `GET` | `/api/v1/deliveries` | List deliveries |
+| `GET` | `/api/v1/deliveries/{delivery_id}` | Read delivery details |
+| `POST` | `/api/v1/deliveries/{delivery_id}/complete` | Complete a delivery |
+| `GET` | `/api/v1/deliveries/{delivery_id}/report.pdf` | Download a PDF report |
+| `POST` | `/api/v1/notifications/retry` | Retry queued notifications |
+
+See [`documentation/api_documentation.md`](documentation/api_documentation.md) for request examples and detailed behavior.
+
+## Run backend tests
+
+Run the tests locally from the repository root:
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+pytest
+```
+
+The test suite covers reading ingestion, duplicate handling, sequence gaps and recovery, temperature alerts, threshold validation, delivery results, PDF report downloads, and dashboard serving. A GitHub Actions workflow runs the backend tests on pushes and pull requests.
+
+## Security and operational notes
+
+- The prototype uses plain HTTP and has no authentication. Keep it on a trusted private LAN.
+- Do not expose port `8000` directly to the public internet.
+- Add HTTPS, authentication, authorization, and secret management before any deployment beyond a controlled prototype.
+- The LittleFS queue uses finite ESP32 internal flash. It is not unlimited storage.
+- The firmware intentionally avoids automatically formatting LittleFS on mount failure to reduce the risk of erasing queued readings. Formatting the filesystem destroys queued data.
+- Verify RTC time and sensor operation; invalid timestamps or sensor readings can compromise report usefulness.
+- Back up the SQLite database before maintenance or upgrades.
+- Do not treat this prototype's reports as pharmaceutical release decisions or compliance records.
+
+## Current limitations and possible next steps
+
+- Add `delivery_id` to each firmware reading and persist it in the offline queue.
+- Add a scanner or input pad for 'delivery_id'.
+- Utilize a higher-accuracy temperature sensor.
+- Improve sensor accuracy and add calibration/validation procedures before considering higher-assurance use.
+- Add HTTPS and authentication for secure network communication.
+- Consider OTA firmware updates, configurable sampling intervals, and bounded-queue health reporting.
+
+## Additional documentation
+
+- [System architecture](documentation/system_architecture.md)
+- [API documentation](documentation/api_documentation.md)
+- [Project structure](documentation/project_structure.md)
+- [Testing plan](documentation/testing_plan.md)
+- [Troubleshooting](documentation/troubleshooting.md)
+- [Hardware notes](hardware/README.md)
+- [Firmware notes](firmware/README.md)
